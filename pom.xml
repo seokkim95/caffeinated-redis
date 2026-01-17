@@ -61,6 +61,12 @@
             <artifactId>jackson-databind</artifactId>
         </dependency>
 
+        <!-- Jackson Java 8 Date/Time Support -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+
         <!-- Spring Boot Configuration Processor -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -102,7 +108,7 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
-            <!-- Source JAR 생성 -->
+            <!-- Source JAR -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
@@ -115,7 +121,7 @@
                     </execution>
                 </executions>
             </plugin>
-            <!-- Javadoc JAR 생성 -->
+            <!-- Javadoc JAR -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
@@ -127,6 +133,15 @@
                         </goals>
                     </execution>
                 </executions>
+            </plugin>
+            <!-- Exec Maven Plugin for running benchmark -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.1.1</version>
+                <configuration>
+                    <mainClass>dev.skim.caffeinatedredis.benchmark.CacheBenchmarkMain</mainClass>
+                </configuration>
             </plugin>
         </plugins>
     </build>

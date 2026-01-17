@@ -8,6 +8,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.skim.caffeinatedredis.cache.TwoLevelCacheManager;
 import dev.skim.caffeinatedredis.pubsub.CacheInvalidationPublisher;
 import dev.skim.caffeinatedredis.pubsub.CacheInvalidationSubscriber;
+import dev.skim.caffeinatedredis.support.NearCacheOperations;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -185,5 +186,15 @@ public class NearCacheAutoConfiguration {
         log.info("Near Cache TwoLevelCacheManager initialized");
 
         return cacheManager;
+    }
+
+    /**
+     * NearCacheOperations utility bean.
+     * Provides convenient methods for programmatic cache operations.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public NearCacheOperations nearCacheOperations(TwoLevelCacheManager cacheManager) {
+        return new NearCacheOperations(cacheManager);
     }
 }
