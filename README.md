@@ -145,6 +145,32 @@ spring:
 
 ### 3. Use Cache Annotations
 
+> **Important (Proxy-based behavior / self-invocation limitation)**
+>
+> Spring Cache annotations (`@Cacheable`, `@CachePut`, `@CacheEvict`) work via **Spring AOP proxies**.
+> Because of this, **calls made from within the same class (self-invocation)** do **not** go through the proxy,
+> so caching will **not** be applied.
+>
+> Example of what does *NOT* work:
+>
+> ```java
+> @Service
+> public class UserService {
+>     @Cacheable("users")
+>     public User findById(Long id) { ... }
+>
+>     public User loadAndProcess(Long id) {
+>         // Self-invocation: this bypasses proxy -> caching NOT applied
+>         return findById(id);
+>     }
+> }
+> ```
+>
+> Recommended approaches:
+> - Move cache-annotated methods into a separate Spring bean and call that bean.
+> - Inject the proxied bean into itself (advanced, use carefully) and call through the proxy.
+> - Use `NearCacheOperations` for programmatic cache access when AOP cannot be applied.
+
 ```java
 @Service
 public class UserService {
