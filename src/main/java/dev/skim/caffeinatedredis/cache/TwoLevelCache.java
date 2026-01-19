@@ -150,6 +150,12 @@ public class TwoLevelCache extends AbstractValueAdaptingCache {
             }
         }
 
+        // Broadcast invalidation to other instances so they don't serve stale L1 entries
+        // (they will reload the latest value from L2 on next access)
+        if (invalidationPublisher != null) {
+            invalidationPublisher.publishEvict(name, key);
+        }
+
         log.trace("Cache put: cache={}, key={}", name, key);
     }
 
