@@ -1,232 +1,257 @@
 package dev.skim.caffeinatedredis.cache;
 
-import com.fasterxml.jackson.annotation.JsonTypeInfo;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import dev.skim.caffeinatedredis.config.NearCacheProperties;
-import dev.skim.caffeinatedredis.pubsub.CacheInvalidationPublisher;
-import dev.skim.caffeinatedredis.pubsub.CacheInvalidationSubscriber;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.listener.ChannelTopic;
-import org.springframework.data.redis.listener.RedisMessageListenerContainer;
-import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
-import org.springframework.data.redis.serializer.StringRedisSerializer;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.SpringBootConfiguration;
+import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Duration;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Integration tests for TwoLevelCache using real Redis via Testcontainers.
+ * Integration tests for the near-cache starter using a real Redis instance (Testcontainers).
+ *
+ * Notes:
+ * - Pub/Sub invalidation requires multiple application instances. We simulate that by starting
+ *   two separate Spring ApplicationContexts with different near-cache.instance-id values.
  */
 @Testcontainers
+@SpringBootTest(
+        classes = TwoLevelCacheRedisIT.TestApp.class,
+        properties = {
+                "spring.main.web-application-type=none",
+                "near-cache.enabled=true",
+                "near-cache.invalidation-channel=it:invalidation",
+                "near-cache.l2.key-prefix=it:",
+                "near-cache.l2.ttl=PT2S",
+                "near-cache.l1.enabled=true",
+                "near-cache.l1.max-size=1000",
+                "near-cache.l1.expire-after-write=PT5M"
+        }
+)
 class TwoLevelCacheRedisIT {
 
     @Container
     static final GenericContainer<?> redis = new GenericContainer<>("redis:7.4-alpine")
             .withExposedPorts(6379);
 
-    private RedisMessageListenerContainer listenerContainer;
+    @DynamicPropertySource
+    static void redisProps(DynamicPropertyRegistry registry) {
+        registry.add("spring.data.redis.host", redis::getHost);
+        registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
+    }
 
-    @AfterEach
-    void tearDown() {
-        if (listenerContainer != null) {
-            listenerContainer.stop();
+    @SpringBootConfiguration
+    @EnableAutoConfiguration
+    static class TestApp {
+        // Minimal Spring Boot app for integration testing.
+        // The starter auto-configuration is discovered via AutoConfiguration.imports.
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    CacheManager cacheManager;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    NearCacheProperties properties;
+
+    @Test
+    void putAndGet_shouldPopulateL1AndL2() {
+        Cache cache = cacheManager.getCache("users");
+        assertThat(cache).isInstanceOf(TwoLevelCache.class);
+
+        cache.put("1", "Alice");
+
+        Cache.ValueWrapper wrapper = cache.get("1");
+        assertThat(wrapper).isNotNull();
+        assertThat(wrapper.get()).isEqualTo("Alice");
+
+        TwoLevelCache twoLevelCache = (TwoLevelCache) cache;
+        assertThat(twoLevelCache.getL1Cache().getIfPresent("1")).isEqualTo("Alice");
+    }
+
+    @Test
+    void l2Ttl_shouldExpireValueWhenL1Disabled() throws Exception {
+        // Disable L1 for a single cache by creating a dedicated context.
+        // This makes the assertion deterministic (no L1 hiding Redis expiration).
+        try (ConfigurableApplicationContext ctx = newSpringContext("ttl-instance", true, false)) {
+            CacheManager cm = ctx.getBean(CacheManager.class);
+            NearCacheProperties props = ctx.getBean(NearCacheProperties.class);
+
+            NearCacheProperties.CacheSpec spec = new NearCacheProperties.CacheSpec();
+            spec.setL2Ttl(Duration.ofMillis(250));
+            props.getCaches().put("ttl-cache", spec);
+
+            Cache cache = cm.getCache("ttl-cache");
+            cache.put("k", "v");
+            assertThat(cache.get("k")).isNotNull();
+
+            Thread.sleep(500);
+
+            assertThat(cache.get("k")).isNull();
         }
     }
 
     @Test
-    void putThenGet_shouldWorkAndPopulateL1() {
-        RedisConnectionFactory connectionFactory = connectionFactory();
-        RedisTemplate<String, Object> redisTemplate = redisTemplate(connectionFactory);
+    void evict_shouldRemoveFromL1AndL2() {
+        Cache cache = cacheManager.getCache("products");
+        assertThat(cache).isInstanceOf(TwoLevelCache.class);
 
-        CacheInvalidationPublisher publisher = publisher(connectionFactory, "it-instance-1");
+        cache.put("p1", "coffee");
+        assertThat(cache.get("p1")).isNotNull();
 
-        TwoLevelCache cache = new TwoLevelCache(
-                "it-cache",
-                Caffeine.newBuilder().maximumSize(1000).build(),
-                redisTemplate,
-                publisher,
-                "it:",
-                Duration.ofMinutes(1),
-                false,
-                true,
-                true
-        );
+        cache.evict("p1");
+        assertThat(cache.get("p1")).isNull();
 
-        cache.put("k1", "v1");
-
-        var wrapper = cache.get("k1");
-        assertThat(wrapper).isNotNull();
-        assertThat(wrapper.get()).isEqualTo("v1");
-
-        // L1 should have the value
-        assertThat(cache.getL1Cache().getIfPresent("k1")).isEqualTo("v1");
+        TwoLevelCache twoLevelCache = (TwoLevelCache) cache;
+        assertThat(twoLevelCache.getL1Cache().getIfPresent("p1")).isNull();
     }
 
     @Test
-    void l2Ttl_shouldExpireInRedis() throws Exception {
-        RedisConnectionFactory connectionFactory = connectionFactory();
-        RedisTemplate<String, Object> redisTemplate = redisTemplate(connectionFactory);
+    void clear_shouldClearL1AndL2() {
+        Cache cache = cacheManager.getCache("orders");
+        assertThat(cache).isInstanceOf(TwoLevelCache.class);
 
-        CacheInvalidationPublisher publisher = publisher(connectionFactory, "it-instance-1");
+        cache.put("o1", "ORDER-1");
+        cache.put("o2", "ORDER-2");
+        assertThat(cache.get("o1")).isNotNull();
+        assertThat(cache.get("o2")).isNotNull();
 
-        Duration ttl = Duration.ofMillis(200);
+        cache.clear();
 
-        TwoLevelCache cache = new TwoLevelCache(
-                "ttl-cache",
-                Caffeine.newBuilder().maximumSize(1000).build(),
-                redisTemplate,
-                publisher,
-                "ttl:",
-                ttl,
-                false,
-                false, // L1 disabled: ensure we observe Redis expiration directly
-                true
-        );
+        assertThat(cache.get("o1")).isNull();
+        assertThat(cache.get("o2")).isNull();
 
-        cache.put("k1", "v1");
-        assertThat(cache.get("k1")).isNotNull();
-
-        Thread.sleep(350);
-
-        // After TTL, Redis should no longer have the key
-        assertThat(cache.get("k1")).isNull();
+        TwoLevelCache twoLevelCache = (TwoLevelCache) cache;
+        assertThat(twoLevelCache.getL1Cache().estimatedSize()).isEqualTo(0);
     }
 
     @Test
-    void pubsubInvalidation_shouldEvictOtherInstanceL1OnPut() throws Exception {
-        RedisConnectionFactory connectionFactory = connectionFactory();
-        RedisTemplate<String, Object> redisTemplate = redisTemplate(connectionFactory);
+    void nullCaching_disabledByDefault_shouldRejectNullOnPut() {
+        Cache cache = cacheManager.getCache("nulls");
+        assertThat(cache).isInstanceOf(TwoLevelCache.class);
 
-        String channel = "it:invalidation";
+        assertThatThrownBy(() -> cache.put("k", null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not allow null");
+    }
 
-        // Instance A (publisher)
-        CacheInvalidationPublisher publisherA = publisher(connectionFactory, "instance-A", channel);
+    @Test
+    void pubsubInvalidation_onPut_shouldEvictOtherInstanceL1() throws Exception {
+        try (ConfigurableApplicationContext ctxA = newSpringContext("instance-A", true, true);
+             ConfigurableApplicationContext ctxB = newSpringContext("instance-B", true, true)) {
 
-        TwoLevelCache cacheA = new TwoLevelCache(
-                "users",
-                Caffeine.newBuilder().maximumSize(1000).build(),
-                redisTemplate,
-                publisherA,
-                "it:",
-                Duration.ofMinutes(1),
-                false,
-                true,
-                true
-        );
+            CacheManager cmA = ctxA.getBean(CacheManager.class);
+            CacheManager cmB = ctxB.getBean(CacheManager.class);
 
-        // Instance B (subscriber)
-        TwoLevelCacheManager managerB = cacheManager(redisTemplate, publisher(connectionFactory, "instance-B", channel));
-        CacheInvalidationSubscriber subscriberB = new CacheInvalidationSubscriber(objectMapper(), "instance-B");
-        subscriberB.setCacheManager(managerB);
+            Cache cacheA = cmA.getCache("users");
+            Cache cacheB = cmB.getCache("users");
 
-        listenerContainer = new RedisMessageListenerContainer();
-        listenerContainer.setConnectionFactory(connectionFactory);
-        listenerContainer.addMessageListener(subscriberB, new ChannelTopic(channel));
-        listenerContainer.afterPropertiesSet();
-        listenerContainer.start();
+            TwoLevelCache b = (TwoLevelCache) cacheB;
 
-        TwoLevelCache cacheB = (TwoLevelCache) managerB.getCache("users");
-        assertThat(cacheB).isNotNull();
+            cacheB.put("1", "old");
+            assertThat(b.getL1Cache().getIfPresent("1")).isEqualTo("old");
 
-        // Seed B's L1 with an old value
-        cacheB.put("1", "old");
-        assertThat(cacheB.getL1Cache().getIfPresent("1")).isEqualTo("old");
+            cacheA.put("1", "new");
 
-        // A writes a new value -> should publish invalidation -> B L1 should evict key "1"
-        cacheA.put("1", "new");
+            long deadline = System.currentTimeMillis() + 3000;
+            while (System.currentTimeMillis() < deadline && b.getL1Cache().getIfPresent("1") != null) {
+                Thread.sleep(50);
+            }
 
-        // Wait briefly for pub/sub
-        long deadline = System.currentTimeMillis() + 2000;
-        while (System.currentTimeMillis() < deadline && cacheB.getL1Cache().getIfPresent("1") != null) {
-            Thread.sleep(50);
+            assertThat(b.getL1Cache().getIfPresent("1")).isNull();
+
+            Cache.ValueWrapper wrapper = cacheB.get("1");
+            assertThat(wrapper).isNotNull();
+            assertThat(wrapper.get()).isEqualTo("new");
         }
-
-        assertThat(cacheB.getL1Cache().getIfPresent("1")).isNull();
-
-        // Next read on B should load from Redis (new value) and repopulate L1
-        var wrapper = cacheB.get("1");
-        assertThat(wrapper).isNotNull();
-        assertThat(wrapper.get()).isEqualTo("new");
-        assertThat(cacheB.getL1Cache().getIfPresent("1")).isEqualTo("new");
     }
 
-    private RedisConnectionFactory connectionFactory() {
-        LettuceConnectionFactory factory = new LettuceConnectionFactory(redis.getHost(), redis.getMappedPort(6379));
-        factory.afterPropertiesSet();
-        return factory;
+    @Test
+    void pubsubInvalidation_onEvict_shouldEvictOtherInstanceL1() throws Exception {
+        try (ConfigurableApplicationContext ctxA = newSpringContext("evict-A", true, true);
+             ConfigurableApplicationContext ctxB = newSpringContext("evict-B", true, true)) {
+
+            CacheManager cmA = ctxA.getBean(CacheManager.class);
+            CacheManager cmB = ctxB.getBean(CacheManager.class);
+
+            Cache cacheA = cmA.getCache("users");
+            Cache cacheB = cmB.getCache("users");
+
+            TwoLevelCache b = (TwoLevelCache) cacheB;
+
+            cacheA.put("1", "v1");
+            cacheB.get("1");
+            assertThat(b.getL1Cache().getIfPresent("1")).isEqualTo("v1");
+
+            cacheA.evict("1");
+
+            long deadline = System.currentTimeMillis() + 3000;
+            while (System.currentTimeMillis() < deadline && b.getL1Cache().getIfPresent("1") != null) {
+                Thread.sleep(50);
+            }
+
+            assertThat(b.getL1Cache().getIfPresent("1")).isNull();
+        }
     }
 
-    private ObjectMapper objectMapper() {
-        ObjectMapper objectMapper = new ObjectMapper();
-        objectMapper.registerModule(new JavaTimeModule());
-        objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    @Test
+    void pubsubInvalidation_onClear_shouldClearOtherInstanceL1() throws Exception {
+        try (ConfigurableApplicationContext ctxA = newSpringContext("clear-A", true, true);
+             ConfigurableApplicationContext ctxB = newSpringContext("clear-B", true, true)) {
 
-        BasicPolymorphicTypeValidator ptv = BasicPolymorphicTypeValidator.builder()
-                .allowIfBaseType(Object.class)
-                .build();
-        objectMapper.activateDefaultTyping(ptv, ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);
+            CacheManager cmA = ctxA.getBean(CacheManager.class);
+            CacheManager cmB = ctxB.getBean(CacheManager.class);
 
-        return objectMapper;
+            Cache cacheA = cmA.getCache("users");
+            Cache cacheB = cmB.getCache("users");
+
+            TwoLevelCache b = (TwoLevelCache) cacheB;
+
+            cacheA.put("1", "v1");
+            cacheB.get("1");
+            assertThat(b.getL1Cache().getIfPresent("1")).isEqualTo("v1");
+
+            cacheA.clear();
+
+            long deadline = System.currentTimeMillis() + 3000;
+            while (System.currentTimeMillis() < deadline && b.getL1Cache().estimatedSize() > 0) {
+                Thread.sleep(50);
+            }
+
+            assertThat(b.getL1Cache().estimatedSize()).isEqualTo(0);
+        }
     }
 
-    private RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory connectionFactory) {
-        RedisTemplate<String, Object> template = new RedisTemplate<>();
-        template.setConnectionFactory(connectionFactory);
+    private ConfigurableApplicationContext newSpringContext(String instanceId, boolean l2Enabled, boolean l1Enabled) {
+        SpringApplication app = new SpringApplication(TestApp.class);
+        app.setRegisterShutdownHook(false);
 
-        StringRedisSerializer stringSerializer = new StringRedisSerializer();
-        GenericJackson2JsonRedisSerializer jsonSerializer = new GenericJackson2JsonRedisSerializer(objectMapper());
-
-        template.setKeySerializer(stringSerializer);
-        template.setValueSerializer(jsonSerializer);
-        template.setHashKeySerializer(stringSerializer);
-        template.setHashValueSerializer(jsonSerializer);
-
-        template.afterPropertiesSet();
-        return template;
-    }
-
-    private CacheInvalidationPublisher publisher(RedisConnectionFactory connectionFactory, String instanceId) {
-        return publisher(connectionFactory, instanceId, "it:invalidation");
-    }
-
-    private CacheInvalidationPublisher publisher(RedisConnectionFactory connectionFactory, String instanceId, String channel) {
-        NearCacheProperties properties = new NearCacheProperties();
-        properties.setInvalidationChannel(channel);
-        properties.setInstanceId(instanceId);
-        return new CacheInvalidationPublisher(new StringRedisTemplate(connectionFactory), objectMapper(), properties, instanceId);
-    }
-
-    private TwoLevelCacheManager cacheManager(RedisTemplate<String, Object> redisTemplate, CacheInvalidationPublisher publisher) {
-        NearCacheProperties properties = new NearCacheProperties();
-        properties.setInvalidationChannel("it:invalidation");
-        properties.setInstanceId(UUID.randomUUID().toString());
-
-        NearCacheProperties.L1CacheProperties l1 = new NearCacheProperties.L1CacheProperties();
-        l1.setEnabled(true);
-        l1.setMaxSize(1000);
-        l1.setExpireAfterWrite(Duration.ofMinutes(5));
-        properties.setL1(l1);
-
-        NearCacheProperties.L2CacheProperties l2 = new NearCacheProperties.L2CacheProperties();
-        l2.setEnabled(true);
-        l2.setKeyPrefix("it:");
-        l2.setTtl(Duration.ofMinutes(1));
-        properties.setL2(l2);
-
-        return new TwoLevelCacheManager(properties, redisTemplate, publisher);
+        return app.run(
+                "--spring.main.web-application-type=none",
+                "--near-cache.enabled=true",
+                "--near-cache.instance-id=" + instanceId,
+                "--near-cache.invalidation-channel=it:invalidation",
+                "--near-cache.l2.enabled=" + l2Enabled,
+                "--near-cache.l2.key-prefix=it:",
+                "--near-cache.l2.ttl=PT2S",
+                "--near-cache.l2.cache-null-values=false",
+                "--near-cache.l1.enabled=" + l1Enabled,
+                "--near-cache.l1.max-size=1000",
+                "--near-cache.l1.expire-after-write=PT5M",
+                "--spring.data.redis.host=" + redis.getHost(),
+                "--spring.data.redis.port=" + redis.getMappedPort(6379)
+        );
     }
 }

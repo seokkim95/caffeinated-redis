@@ -17,6 +17,7 @@ import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSeriali
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 
 /**
@@ -84,15 +85,21 @@ public class CacheBenchmarkMain {
 
         } catch (Exception e) {
             System.err.println("Benchmark failed: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("Tip: Ensure Redis is running and reachable (e.g., redis-cli ping). ");
             System.exit(1);
         }
     }
 
     private static void runAllBenchmarks(RedisTemplate<String, Object> redisTemplate,
-                                          StringRedisTemplate stringRedisTemplate) {
+                                         StringRedisTemplate stringRedisTemplate) {
 
         BenchmarkRunner runner = new BenchmarkRunner(WARMUP_ITERATIONS, MEASURE_ITERATIONS, THREAD_COUNT);
+
+        // Use a unique namespace per run to avoid collisions with leftover keys.
+        String runId = Long.toString(Instant.now().toEpochMilli());
+        String redisOnlyPrefix = "bench:" + runId + ":redis:";
+        String twoLevelPrefix = "bench:" + runId + ":twolevel:";
+        String invalidationChannel = "bench:" + runId + ":invalidation";
 
         // ===== BENCHMARK 1: READ-HEAVY WORKLOAD (90% reads, 10% writes) =====
         System.out.println("═══════════════════════════════════════════════════════════════════════════════");
@@ -114,7 +121,7 @@ public class CacheBenchmarkMain {
 
         // 1.2 Redis-Only
         RedisOnlyBenchmark redisOnly = new RedisOnlyBenchmark(
-                "Redis-Only (L2)", redisTemplate, "bench:redis:", L2_TTL);
+                "Redis-Only (L2)", redisTemplate, redisOnlyPrefix, L2_TTL);
         redisOnly.clear();
         redisOnly.prePopulate(PRE_POPULATE_COUNT);
         BenchmarkResult redisReadHeavy = runner.runReadHeavy(
@@ -125,7 +132,7 @@ public class CacheBenchmarkMain {
 
         // 1.3 TwoLevel Cache
         TwoLevelCacheBenchmark twoLevel = createTwoLevelBenchmark(
-                "TwoLevel/Near Cache (L1+L2)", redisTemplate, stringRedisTemplate);
+                redisTemplate, stringRedisTemplate, twoLevelPrefix, invalidationChannel);
         twoLevel.clear();
         twoLevel.prePopulate(PRE_POPULATE_COUNT);
         BenchmarkResult twoLevelReadHeavy = runner.runReadHeavy(
@@ -218,14 +225,7 @@ public class CacheBenchmarkMain {
     }
 
     private static RedisTemplate<String, Object> createRedisTemplate(RedisConnectionFactory connectionFactory) {
-        ObjectMapper objectMapper = new ObjectMapper();
-        objectMapper.registerModule(new JavaTimeModule());
-        objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-
-        BasicPolymorphicTypeValidator ptv = BasicPolymorphicTypeValidator.builder()
-                .allowIfBaseType(Object.class)
-                .build();
-        objectMapper.activateDefaultTyping(ptv, ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);
+        ObjectMapper objectMapper = createBenchmarkObjectMapper();
 
         RedisTemplate<String, Object> template = new RedisTemplate<>();
         template.setConnectionFactory(connectionFactory);
@@ -242,13 +242,27 @@ public class CacheBenchmarkMain {
         return template;
     }
 
-    private static TwoLevelCacheBenchmark createTwoLevelBenchmark(String name,
-                                                                   RedisTemplate<String, Object> redisTemplate,
-                                                                   StringRedisTemplate stringRedisTemplate) {
+    private static ObjectMapper createBenchmarkObjectMapper() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.registerModule(new JavaTimeModule());
+        objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
+        BasicPolymorphicTypeValidator ptv = BasicPolymorphicTypeValidator.builder()
+                .allowIfBaseType(Object.class)
+                .build();
+        objectMapper.activateDefaultTyping(ptv, ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);
+
+        return objectMapper;
+    }
+
+    private static TwoLevelCacheBenchmark createTwoLevelBenchmark(RedisTemplate<String, Object> redisTemplate,
+                                                                  StringRedisTemplate stringRedisTemplate,
+                                                                  String keyPrefix,
+                                                                  String invalidationChannel) {
         // Create properties
         NearCacheProperties properties = new NearCacheProperties();
         properties.setEnabled(true);
-        properties.setInvalidationChannel("bench:invalidation");
+        properties.setInvalidationChannel(invalidationChannel);
         properties.setInstanceId(UUID.randomUUID().toString());
 
         NearCacheProperties.L1CacheProperties l1Props = new NearCacheProperties.L1CacheProperties();
@@ -260,19 +274,19 @@ public class CacheBenchmarkMain {
         NearCacheProperties.L2CacheProperties l2Props = new NearCacheProperties.L2CacheProperties();
         l2Props.setEnabled(true);
         l2Props.setTtl(L2_TTL);
-        l2Props.setKeyPrefix("bench:twolevel:");
+        l2Props.setKeyPrefix(keyPrefix);
         properties.setL2(l2Props);
 
-        // Create publisher (simplified for benchmark - no actual pub/sub)
-        ObjectMapper objectMapper = new ObjectMapper();
+        // Publisher is required by TwoLevelCache for invalidation signaling.
+        // For this benchmark, there is no subscriber container, so it does not add real pub/sub overhead.
+        ObjectMapper objectMapper = createBenchmarkObjectMapper();
         CacheInvalidationPublisher publisher = new CacheInvalidationPublisher(
                 stringRedisTemplate, objectMapper, properties, properties.getInstanceId());
 
-        // Create cache manager and get cache
         TwoLevelCacheManager cacheManager = new TwoLevelCacheManager(properties, redisTemplate, publisher);
         org.springframework.cache.Cache cache = cacheManager.getCache("benchmark");
 
-        return new TwoLevelCacheBenchmark(name, cache);
+        return new TwoLevelCacheBenchmark("TwoLevel/Near Cache (L1+L2)", cache);
     }
 
     private static void printFinalSummary() {
@@ -284,24 +298,24 @@ public class CacheBenchmarkMain {
         System.out.println("║  Key Findings:                                                                ║");
         System.out.println("║                                                                               ║");
         System.out.println("║  1. Caffeine-Only (L1):                                                       ║");
-        System.out.println("║     ✅ Fastest latency (in-memory)                                            ║");
-        System.out.println("║     ❌ No distributed consistency                                             ║");
-        System.out.println("║     ❌ Data lost on restart                                                   ║");
+        System.out.println("║     [+] Fastest latency (in-memory)                                          ║");
+        System.out.println("║     [-] No distributed consistency                                           ║");
+        System.out.println("║     [-] Data lost on restart                                                 ║");
         System.out.println("║                                                                               ║");
-        System.out.println("║  2. Redis-Only (L2):                                                          ║");
-        System.out.println("║     ✅ Distributed consistency                                                ║");
-        System.out.println("║     ✅ Data persistence                                                       ║");
-        System.out.println("║     ❌ Network latency overhead                                               ║");
+        System.out.println("║  2. Redis-Only (L2):                                                         ║");
+        System.out.println("║     [+] Distributed consistency                                              ║");
+        System.out.println("║     [+] Data persistence                                                     ║");
+        System.out.println("║     [-] Network latency overhead                                             ║");
         System.out.println("║                                                                               ║");
-        System.out.println("║  3. TwoLevel/Near Cache (L1+L2):                                              ║");
-        System.out.println("║     ✅ Near in-memory latency for hot data (L1 hits)                         ║");
-        System.out.println("║     ✅ Distributed consistency via Redis                                      ║");
-        System.out.println("║     ✅ Automatic L1 invalidation across instances                             ║");
-        System.out.println("║     ✅ Best of both worlds for MSA environments                               ║");
+        System.out.println("║  3. TwoLevel/Near Cache (L1+L2):                                             ║");
+        System.out.println("║     [+] Near in-memory latency for hot data (L1 hits)                        ║");
+        System.out.println("║     [+] Distributed consistency via Redis                                    ║");
+        System.out.println("║     [+] Automatic L1 invalidation across instances                           ║");
+        System.out.println("║     [+] Best of both worlds for MSA environments                             ║");
         System.out.println("║                                                                               ║");
         System.out.println("╠═══════════════════════════════════════════════════════════════════════════════╣");
         System.out.println("║                                                                               ║");
-        System.out.println("║  💡 TwoLevel Cache is optimal when:                                           ║");
+        System.out.println("║  Tip: TwoLevel Cache is optimal when:                                        ║");
         System.out.println("║     - Running multiple application instances                                  ║");
         System.out.println("║     - Read-heavy workload with occasional writes                              ║");
         System.out.println("║     - Need both performance and consistency                                   ║");

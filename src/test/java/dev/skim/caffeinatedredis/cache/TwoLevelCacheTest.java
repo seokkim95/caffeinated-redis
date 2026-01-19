@@ -4,13 +4,12 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import dev.skim.caffeinatedredis.pubsub.CacheInvalidationPublisher;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Answers;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
 
 import java.time.Duration;
 
@@ -20,35 +19,27 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
-@DisplayName("TwoLevelCache 테스트")
 class TwoLevelCacheTest {
 
-    @Mock
-    private RedisTemplate<String, Object> redisTemplate;
+    @Mock(answer = Answers.RETURNS_DEEP_STUBS)
+    RedisTemplate<String, Object> redisTemplate;
 
     @Mock
-    private ValueOperations<String, Object> valueOperations;
+    CacheInvalidationPublisher invalidationPublisher;
 
-    @Mock
-    private CacheInvalidationPublisher invalidationPublisher;
-
-    private TwoLevelCache cache;
-    private Cache<Object, Object> caffeineCache;
+    TwoLevelCache cache;
+    Cache<Object, Object> l1;
 
     @BeforeEach
     void setUp() {
-        caffeineCache = Caffeine.newBuilder()
-                .maximumSize(100)
-                .build();
-
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        l1 = Caffeine.newBuilder().maximumSize(100).build();
 
         cache = new TwoLevelCache(
-                "testCache",
-                caffeineCache,
+                "test-cache",
+                l1,
                 redisTemplate,
                 invalidationPublisher,
-                "near-cache:",
+                "test:",
                 Duration.ofMinutes(10),
                 false,
                 true,
@@ -57,106 +48,92 @@ class TwoLevelCacheTest {
     }
 
     @Test
-    @DisplayName("L1 캐시에 값이 있으면 L1에서 반환한다")
-    void shouldReturnFromL1WhenValueExists() {
-        // given
-        String key = "testKey";
-        String value = "testValue";
-        caffeineCache.put(key, value);
+    void get_shouldReturnFromL1_whenPresent() {
+        l1.put("k", "v");
 
-        // when
-        var result = cache.get(key);
+        org.springframework.cache.Cache.ValueWrapper wrapper = cache.get("k");
 
-        // then
-        assertThat(result).isNotNull();
-        assertThat(result.get()).isEqualTo(value);
-        verify(redisTemplate, never()).opsForValue();
+        assertThat(wrapper).isNotNull();
+        assertThat(wrapper.get()).isEqualTo("v");
+        verify(redisTemplate.opsForValue(), never()).get(anyString());
     }
 
     @Test
-    @DisplayName("L1 미스 시 L2에서 조회하고 L1에 저장한다")
-    void shouldFetchFromL2AndStoreInL1WhenL1Miss() {
-        // given
-        String key = "testKey";
-        String value = "testValue";
-        when(valueOperations.get(anyString())).thenReturn(value);
+    void get_shouldLoadFromL2AndPopulateL1_whenL1Miss() {
+        when(redisTemplate.opsForValue().get(anyString())).thenReturn("v");
 
-        // when
-        var result = cache.get(key);
+        org.springframework.cache.Cache.ValueWrapper wrapper = cache.get("k");
 
-        // then
-        assertThat(result).isNotNull();
-        assertThat(result.get()).isEqualTo(value);
-        assertThat(caffeineCache.getIfPresent(key)).isEqualTo(value);
+        assertThat(wrapper).isNotNull();
+        assertThat(wrapper.get()).isEqualTo("v");
+        assertThat(l1.getIfPresent("k")).isEqualTo("v");
+        verify(redisTemplate.opsForValue()).get(anyString());
     }
 
     @Test
-    @DisplayName("L1, L2 모두 미스 시 null을 반환한다")
-    void shouldReturnNullWhenBothCachesMiss() {
-        // given
-        String key = "testKey";
-        when(valueOperations.get(anyString())).thenReturn(null);
+    void get_shouldReturnNull_whenBothMiss() {
+        when(redisTemplate.opsForValue().get(anyString())).thenReturn(null);
 
-        // when
-        var result = cache.get(key);
+        org.springframework.cache.Cache.ValueWrapper wrapper = cache.get("k");
 
-        // then
-        assertThat(result).isNull();
+        assertThat(wrapper).isNull();
+        verify(redisTemplate.opsForValue()).get(anyString());
     }
 
     @Test
-    @DisplayName("put 시 L1, L2 모두에 저장한다")
-    void shouldPutInBothCaches() {
-        // given
-        String key = "testKey";
-        String value = "testValue";
+    void put_shouldWriteToL1AndL2() {
+        cache.put("k", "v");
 
-        // when
-        cache.put(key, value);
+        assertThat(l1.getIfPresent("k")).isEqualTo("v");
 
-        // then
-        assertThat(caffeineCache.getIfPresent(key)).isEqualTo(value);
-        verify(valueOperations).set(anyString(), eq(value), any(Duration.class));
+        verify(redisTemplate.opsForValue(), atLeastOnce()).set(anyString(), eq("v"), any(Duration.class));
     }
 
     @Test
-    @DisplayName("evict 시 L1, L2 모두에서 삭제하고 무효화 메시지를 발행한다")
-    void shouldEvictFromBothCachesAndPublishInvalidation() {
-        // given
-        String key = "testKey";
-        String value = "testValue";
-        caffeineCache.put(key, value);
+    void evict_shouldRemoveFromL1AndL2_andPublishInvalidation() {
+        l1.put("k", "v");
 
-        // when
-        cache.evict(key);
+        cache.evict("k");
 
-        // then
-        assertThat(caffeineCache.getIfPresent(key)).isNull();
+        assertThat(l1.getIfPresent("k")).isNull();
         verify(redisTemplate).delete(anyString());
-        verify(invalidationPublisher).publishEvict("testCache", key);
+        verify(invalidationPublisher).publishEvict("test-cache", "k");
     }
 
     @Test
-    @DisplayName("evictFromL1Only는 L1만 무효화하고 L2와 Publisher는 호출하지 않는다")
-    void shouldOnlyEvictFromL1WhenEvictFromL1Only() {
-        // given
-        String key = "testKey";
-        String value = "testValue";
-        caffeineCache.put(key, value);
+    void clear_shouldInvalidateL1_andDeleteL2Keys_andPublishInvalidation() {
+        l1.put("k1", "v1");
+        l1.put("k2", "v2");
 
-        // when
-        cache.evictFromL1Only(key);
+        cache.clear();
 
-        // then
-        assertThat(caffeineCache.getIfPresent(key)).isNull();
+        assertThat(l1.estimatedSize()).isEqualTo(0);
+        verify(invalidationPublisher).publishClear("test-cache");
+    }
+
+    @Test
+    void evictFromL1Only_shouldNotTouchL2_orPublish() {
+        l1.put("k", "v");
+
+        cache.evictFromL1Only("k");
+
+        assertThat(l1.getIfPresent("k")).isNull();
         verify(redisTemplate, never()).delete(anyString());
         verify(invalidationPublisher, never()).publishEvict(anyString(), any());
     }
 
     @Test
-    @DisplayName("캐시 이름을 올바르게 반환한다")
-    void shouldReturnCorrectCacheName() {
-        assertThat(cache.getName()).isEqualTo("testCache");
+    void clearL1Only_shouldNotTouchL2_orPublish() {
+        l1.put("k", "v");
+
+        cache.clearL1Only();
+
+        assertThat(l1.estimatedSize()).isEqualTo(0);
+        verifyNoInteractions(invalidationPublisher);
+    }
+
+    @Test
+    void getName_shouldReturnCacheName() {
+        assertThat(cache.getName()).isEqualTo("test-cache");
     }
 }
-

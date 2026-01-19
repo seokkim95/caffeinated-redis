@@ -8,6 +8,8 @@ import java.util.List;
  */
 public class BenchmarkReport {
 
+    private static final int WIDTH = 78;
+
     private final List<BenchmarkResult> results = new ArrayList<>();
     private final String title;
 
@@ -72,61 +74,62 @@ public class BenchmarkReport {
             }
         }
 
-        System.out.println("┌─────────────────────────────────────────────────────────────────────────────┐");
-        System.out.println("│                              ANALYSIS                                       │");
-        System.out.println("├─────────────────────────────────────────────────────────────────────────────┤");
+        System.out.println("┌" + "─".repeat(WIDTH) + "┐");
+        System.out.println("│" + padRight("ANALYSIS") + "│");
+        System.out.println("├" + "─".repeat(WIDTH) + "┤");
 
         if (twoLevel != null && redisOnly != null) {
             double latencyImprovement = ((redisOnly.avgLatencyMs() - twoLevel.avgLatencyMs()) / redisOnly.avgLatencyMs()) * 100;
             double throughputImprovement = ((twoLevel.throughputOpsPerSec() - redisOnly.throughputOpsPerSec()) / redisOnly.throughputOpsPerSec()) * 100;
 
-            System.out.printf("│ TwoLevel vs Redis-Only:                                                     │%n");
-            System.out.printf("│   • Latency Improvement    : %+.2f%% %s                               │%n",
-                    latencyImprovement,
-                    latencyImprovement > 0 ? "(FASTER)" : "(SLOWER)");
-            System.out.printf("│   • Throughput Improvement : %+.2f%% %s                               │%n",
-                    throughputImprovement,
-                    throughputImprovement > 0 ? "(BETTER)" : "(WORSE)");
+            System.out.println("│" + padRight("TwoLevel vs Redis-Only:") + "│");
+            System.out.println("│" + padRight(String.format("  - Latency improvement    : %+.2f%% %s", latencyImprovement,
+                    latencyImprovement > 0 ? "(FASTER)" : "(SLOWER)")) + "│");
+            System.out.println("│" + padRight(String.format("  - Throughput improvement : %+.2f%% %s", throughputImprovement,
+                    throughputImprovement > 0 ? "(BETTER)" : "(WORSE)")) + "│");
         }
 
         if (twoLevel != null && caffeineOnly != null) {
             double latencyDiff = ((twoLevel.avgLatencyMs() - caffeineOnly.avgLatencyMs()) / caffeineOnly.avgLatencyMs()) * 100;
 
-            System.out.printf("│                                                                             │%n");
-            System.out.printf("│ TwoLevel vs Caffeine-Only:                                                  │%n");
-            System.out.printf("│   • Latency Overhead       : %+.2f%% (L2 sync cost)                     │%n",
-                    latencyDiff);
-            System.out.printf("│   • Benefit: Distributed consistency + Persistence                         │%n");
+            System.out.println("│" + padRight("") + "│");
+            System.out.println("│" + padRight("TwoLevel vs Caffeine-Only:") + "│");
+            System.out.println("│" + padRight(String.format("  - Latency overhead       : %+.2f%% (dual-write + L2 sync)", latencyDiff)) + "│");
+            System.out.println("│" + padRight("  - Benefit                : distributed consistency + persistence") + "│");
         }
 
         if (caffeineOnly != null && redisOnly != null) {
             double networkOverhead = ((redisOnly.avgLatencyMs() - caffeineOnly.avgLatencyMs()) / caffeineOnly.avgLatencyMs()) * 100;
-            System.out.printf("│                                                                             │%n");
-            System.out.printf("│ Network Overhead (Redis vs Caffeine): %+.2f%%                            │%n",
-                    networkOverhead);
+            System.out.println("│" + padRight("") + "│");
+            System.out.println("│" + padRight(String.format("Network overhead (Redis vs Caffeine): %+.2f%%", networkOverhead)) + "│");
         }
 
-        System.out.println("├─────────────────────────────────────────────────────────────────────────────┤");
-        System.out.println("│                            CONCLUSION                                       │");
-        System.out.println("├─────────────────────────────────────────────────────────────────────────────┤");
+        System.out.println("├" + "─".repeat(WIDTH) + "┤");
+        System.out.println("│" + padRight("CONCLUSION") + "│");
+        System.out.println("├" + "─".repeat(WIDTH) + "┤");
 
-        if (twoLevel != null && redisOnly != null && caffeineOnly != null) {
+        if (twoLevel != null && redisOnly != null) {
             if (twoLevel.avgLatencyMs() < redisOnly.avgLatencyMs()) {
-                System.out.println("│ ✅ TwoLevel Cache achieves BETTER performance than Redis-Only              │");
-                System.out.println("│    by leveraging local L1 cache for frequently accessed data.              │");
-                System.out.println("│                                                                             │");
-                System.out.println("│ ✅ TwoLevel Cache provides distributed consistency that                     │");
-                System.out.println("│    Caffeine-Only cannot offer in multi-instance deployments.               │");
-                System.out.println("│                                                                             │");
-                System.out.println("│ 🎯 RECOMMENDATION: Use TwoLevel (Near) Cache for MSA environments          │");
-                System.out.println("│    where both performance and consistency are required.                    │");
+                System.out.println("│" + padRight("[PASS] TwoLevel is faster than Redis-Only in this run.") + "│");
+                System.out.println("│" + padRight("       Hot keys are served from L1; writes keep L2 consistent.") + "│");
+                System.out.println("│" + padRight("       Recommendation: Use TwoLevel for MSA read-heavy workloads.") + "│");
             } else {
-                System.out.println("│ ⚠️  Results may vary based on network conditions and data access patterns. │");
+                System.out.println("│" + padRight("[WARN] TwoLevel was not faster than Redis-Only in this run.") + "│");
+                System.out.println("│" + padRight("       Results vary depending on network and access distribution.") + "│");
             }
         }
 
-        System.out.println("└─────────────────────────────────────────────────────────────────────────────┘");
+        System.out.println("└" + "─".repeat(WIDTH) + "┘");
         System.out.println();
     }
-}
 
+    private static String padRight(String s) {
+        if (s == null) {
+            s = "";
+        }
+        if (s.length() >= WIDTH) {
+            return s.substring(0, WIDTH);
+        }
+        return s + " ".repeat(WIDTH - s.length());
+    }
+}

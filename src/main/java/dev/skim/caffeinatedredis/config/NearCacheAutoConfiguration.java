@@ -14,6 +14,7 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.cache.CacheManager;
@@ -140,10 +141,14 @@ public class NearCacheAutoConfiguration {
     }
 
     /**
-     * Redis Pub/Sub listener container
+     * Redis Pub/Sub listener container.
+     *
+     * This must only start when Redis (L2) is enabled. In L1-only mode we intentionally skip
+     * starting Pub/Sub infrastructure to avoid requiring a real Redis connection.
      */
     @Bean
     @ConditionalOnMissingBean(name = "nearCacheMessageListenerContainer")
+    @ConditionalOnExpression("${near-cache.l2.enabled:true}")
     public RedisMessageListenerContainer nearCacheMessageListenerContainer(
             RedisConnectionFactory connectionFactory,
             CacheInvalidationSubscriber subscriber,

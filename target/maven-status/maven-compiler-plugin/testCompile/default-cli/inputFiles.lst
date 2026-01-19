@@ -1,6 +1,0 @@
-/Users/seokhoonkim/Desktop/vibecoding/caffeinated-redis/src/test/java/dev/skim/caffeinatedredis/CaffeinatedRedisApplicationTests.java
-/Users/seokhoonkim/Desktop/vibecoding/caffeinated-redis/src/test/java/dev/skim/caffeinatedredis/cache/TwoLevelCacheManagerTest.java
-/Users/seokhoonkim/Desktop/vibecoding/caffeinated-redis/src/test/java/dev/skim/caffeinatedredis/cache/TwoLevelCacheRedisIT.java
-/Users/seokhoonkim/Desktop/vibecoding/caffeinated-redis/src/test/java/dev/skim/caffeinatedredis/cache/TwoLevelCacheTest.java
-/Users/seokhoonkim/Desktop/vibecoding/caffeinated-redis/src/test/java/dev/skim/caffeinatedredis/config/NearCacheAutoConfigurationTest.java
-/Users/seokhoonkim/Desktop/vibecoding/caffeinated-redis/src/test/java/dev/skim/caffeinatedredis/message/CacheInvalidationMessageTest.java

@@ -1,13 +1,12 @@
 package dev.skim.caffeinatedredis.benchmark;
 
-import dev.skim.caffeinatedredis.cache.TwoLevelCache;
 import org.springframework.cache.Cache;
 
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * TwoLevelCache adapter for benchmarking.
- * Represents L1+L2 caching strategy (Near Cache).
+ * Cache adapter for benchmarking the TwoLevel/Near Cache strategy.
  */
 public class TwoLevelCacheBenchmark {
 
@@ -15,8 +14,8 @@ public class TwoLevelCacheBenchmark {
     private final String name;
 
     public TwoLevelCacheBenchmark(String name, Cache cache) {
-        this.name = name;
-        this.cache = cache;
+        this.name = Objects.requireNonNull(name, "name must not be null");
+        this.cache = Objects.requireNonNull(cache, "cache must not be null");
     }
 
     public String getName() {
@@ -44,14 +43,14 @@ public class TwoLevelCacheBenchmark {
      * Get read operation for benchmark
      */
     public Consumer<Integer> getReadOperation(int keySpace) {
-        return i -> get("key-" + (i % keySpace));
+        return i -> get(keyOf(i, keySpace));
     }
 
     /**
      * Get write operation for benchmark
      */
     public Consumer<Integer> getWriteOperation(int keySpace) {
-        return i -> put("key-" + (i % keySpace), "value-" + i);
+        return i -> put(keyOf(i, keySpace), "value-" + i);
     }
 
     /**
@@ -63,14 +62,7 @@ public class TwoLevelCacheBenchmark {
         }
     }
 
-    /**
-     * Get the underlying TwoLevelCache for L1-only operations
-     */
-    public TwoLevelCache getTwoLevelCache() {
-        if (cache instanceof TwoLevelCache) {
-            return (TwoLevelCache) cache;
-        }
-        return null;
+    private static String keyOf(int i, int keySpace) {
+        return "key-" + (i % keySpace);
     }
 }
-

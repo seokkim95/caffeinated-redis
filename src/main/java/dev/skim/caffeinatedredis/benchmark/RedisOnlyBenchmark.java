@@ -3,11 +3,12 @@ package dev.skim.caffeinatedredis.benchmark;
 import org.springframework.data.redis.core.RedisTemplate;
 
 import java.time.Duration;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
  * Redis-only cache adapter for benchmarking.
- * Represents L2-only caching strategy (network-based).
+ * Represents L2-only caching strategy.
  */
 public class RedisOnlyBenchmark {
 
@@ -18,9 +19,9 @@ public class RedisOnlyBenchmark {
 
     public RedisOnlyBenchmark(String name, RedisTemplate<String, Object> redisTemplate,
                               String keyPrefix, Duration ttl) {
-        this.name = name;
-        this.redisTemplate = redisTemplate;
-        this.keyPrefix = keyPrefix;
+        this.name = Objects.requireNonNull(name, "name must not be null");
+        this.redisTemplate = Objects.requireNonNull(redisTemplate, "redisTemplate must not be null");
+        this.keyPrefix = Objects.requireNonNull(keyPrefix, "keyPrefix must not be null");
         this.ttl = ttl;
     }
 
@@ -38,16 +39,16 @@ public class RedisOnlyBenchmark {
     }
 
     public Object get(String key) {
-        String redisKey = keyPrefix + key;
-        return redisTemplate.opsForValue().get(redisKey);
+        return redisTemplate.opsForValue().get(keyPrefix + key);
     }
 
     public void evict(String key) {
-        String redisKey = keyPrefix + key;
-        redisTemplate.delete(redisKey);
+        redisTemplate.delete(keyPrefix + key);
     }
 
     public void clear() {
+        // For this benchmark we use a per-run unique prefix (bench:<runId>:...), so KEY lookup is bounded.
+        // Using KEYS is acceptable and keeps the benchmark code simple.
         var keys = redisTemplate.keys(keyPrefix + "*");
         if (keys != null && !keys.isEmpty()) {
             redisTemplate.delete(keys);
@@ -77,4 +78,3 @@ public class RedisOnlyBenchmark {
         }
     }
 }
-

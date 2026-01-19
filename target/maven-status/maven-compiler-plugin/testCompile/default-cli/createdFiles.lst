@@ -1,6 +1,0 @@
-dev/skim/caffeinatedredis/message/CacheInvalidationMessageTest.class
-dev/skim/caffeinatedredis/cache/TwoLevelCacheTest.class
-dev/skim/caffeinatedredis/CaffeinatedRedisApplicationTests.class
-dev/skim/caffeinatedredis/cache/TwoLevelCacheRedisIT.class
-dev/skim/caffeinatedredis/config/NearCacheAutoConfigurationTest.class
-dev/skim/caffeinatedredis/cache/TwoLevelCacheManagerTest.class
